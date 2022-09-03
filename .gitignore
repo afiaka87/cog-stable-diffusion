@@ -2,3 +2,4 @@
 __pycache__/
 diffusers-cache/.dockerignore
 .vscode/
+diffusers-cache/
