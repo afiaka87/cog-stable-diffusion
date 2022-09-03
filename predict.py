@@ -8,7 +8,7 @@ from PIL import Image
 from cog import BasePredictor, Input, Path
 
 from image_to_image import (
-    StableDiffusionImg2ImgPipeline,
+    AestheticGuidedTextToImagePipeline,
     preprocess_init_image,
     preprocess_mask,
 )
@@ -24,7 +24,7 @@ class Predictor(BasePredictor):
         scheduler = PNDMScheduler(
             beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear"
         )
-        self.pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+        self.pipe = AestheticGuidedTextToImagePipeline.from_pretrained(
             "CompVis/stable-diffusion-v1-4",
             scheduler=scheduler,
             revision="fp16",
@@ -72,6 +72,12 @@ class Predictor(BasePredictor):
         seed: int = Input(
             description="Random seed. Leave blank to randomize the seed", default=None
         ),
+        aesthetic_rating: int = Input(
+            description="Aesthetic rating", default=8, ge=1, le=9
+        ),
+        aesthetic_weight: float = Input(
+            description="Aesthetic weight", default=0.1, ge=0, le=1
+        ),
     ) -> List[Path]:
         """Run a single prediction on the model"""
         if seed is None:
@@ -112,6 +118,8 @@ class Predictor(BasePredictor):
             height=height,
             prompt_strength=prompt_strength,
             guidance_scale=guidance_scale,
+            aesthetic_rating=aesthetic_rating,
+            aesthetic_weight=aesthetic_weight,
             generator=generator,
             num_inference_steps=num_inference_steps,
         )

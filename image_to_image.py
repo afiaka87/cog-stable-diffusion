@@ -1,5 +1,7 @@
 import inspect
 from typing import List, Optional, Union, Tuple
+from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -16,6 +18,27 @@ from diffusers import (
 from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
 from tqdm.auto import tqdm
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+
+from torch.nn import functional as F
+
+
+def normalized(a, axis=-1, order=2):
+    l2 = np.atleast_1d(np.linalg.norm(a, order, axis))
+    l2[l2 == 0] = 1
+    return a / np.expand_dims(l2, axis)
+
+
+@lru_cache(maxsize=None)  # keep these in memory
+def load_aesthetic_vit_l_14_embed(
+    rating: int = 9, embed_dir: str = "aesthetic_clip_embeds"
+) -> torch.Tensor:
+    """
+    Load the aesthetic CLIP embedding for the given rating.
+    """
+    assert rating in range(1, 10), "rating must be in [1, 2, 3, 4, 5, 6, 7, 8, 9]"
+    embed_path = Path(embed_dir).joinpath(f"rating{rating}.npy")
+    embed_npy = np.load(embed_path)
+    return normalized(embed_npy)
 
 
 def preprocess_init_image(image: Image, width: int, height: int):
@@ -36,7 +59,7 @@ def preprocess_mask(mask: Image, width: int, height: int):
     return mask
 
 
-class StableDiffusionImg2ImgPipeline(DiffusionPipeline):
+class AestheticGuidedTextToImagePipeline(DiffusionPipeline):
     """
     From https://github.com/huggingface/diffusers/pull/241
     """
@@ -74,6 +97,8 @@ class StableDiffusionImg2ImgPipeline(DiffusionPipeline):
         prompt_strength: float = 0.8,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
+        aesthetic_rating: int = 9,
+        aesthetic_weight: float = 0.1,
         eta: float = 0.0,
         generator: Optional[torch.Generator] = None,
     ) -> Image:
@@ -98,6 +123,16 @@ class StableDiffusionImg2ImgPipeline(DiffusionPipeline):
 
         if width % 8 != 0 or height % 8 != 0:
             raise ValueError("Width and height must both be divisible by 8")
+
+        if aesthetic_rating < 1 or aesthetic_rating > 9:
+            raise ValueError(
+                f"The value of aesthetic_rating should in [1, 9] but is {aesthetic_rating}"
+            )
+
+        if aesthetic_weight < 0.0 or aesthetic_weight > 1.0:
+            raise ValueError(
+                f"The value of aesthetic_weight should in [0.0, 1.0] but is {aesthetic_weight}"
+            )
 
         # set timesteps
         accepts_offset = "offset" in set(
@@ -130,7 +165,11 @@ class StableDiffusionImg2ImgPipeline(DiffusionPipeline):
 
         do_classifier_free_guidance = guidance_scale > 1.0
         text_embeddings = self.embed_text(
-            prompt, do_classifier_free_guidance, batch_size
+            prompt,
+            do_classifier_free_guidance,
+            batch_size,
+            aesthetic_rating=aesthetic_rating,
+            aesthetic_weight=aesthetic_weight,
         )
 
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
@@ -159,7 +198,7 @@ class StableDiffusionImg2ImgPipeline(DiffusionPipeline):
 
             if isinstance(self.scheduler, LMSDiscreteScheduler):
                 sigma = self.scheduler.sigmas[i]
-                latent_model_input = latent_model_input / ((sigma ** 2 + 1) ** 0.5)
+                latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
 
             # predict the noise residual
             noise_pred = self.unet(
@@ -175,13 +214,13 @@ class StableDiffusionImg2ImgPipeline(DiffusionPipeline):
 
             # compute the previous noisy sample x_t -> x_t-1
             if isinstance(self.scheduler, LMSDiscreteScheduler):
-                latents = self.scheduler.step(noise_pred, i, latents, **extra_step_kwargs)[
-                    "prev_sample"
-                ]
+                latents = self.scheduler.step(
+                    noise_pred, i, latents, **extra_step_kwargs
+                )["prev_sample"]
             else:
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs)[
-                    "prev_sample"
-                ]
+                latents = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs
+                )["prev_sample"]
 
             # replace the unmasked part with original latents, with added noise
             if mask is not None:
@@ -189,7 +228,9 @@ class StableDiffusionImg2ImgPipeline(DiffusionPipeline):
                 timesteps = torch.tensor(
                     [timesteps] * batch_size, dtype=torch.long, device=self.device
                 )
-                noisy_init_latents = self.scheduler.add_noise(init_latents_orig, mask_noise, timesteps)
+                noisy_init_latents = self.scheduler.add_noise(
+                    init_latents_orig, mask_noise, timesteps
+                )
                 latents = noisy_init_latents * mask + latents * (1 - mask)
 
         # scale and decode the image latents with vae
@@ -247,6 +288,8 @@ class StableDiffusionImg2ImgPipeline(DiffusionPipeline):
         prompt: Union[str, List[str]],
         do_classifier_free_guidance: bool,
         batch_size: int,
+        aesthetic_rating: int = 9,
+        aesthetic_weight: float = 0.0,
     ) -> torch.FloatTensor:
         # get prompt text embeddings
         text_input = self.tokenizer(
@@ -256,7 +299,13 @@ class StableDiffusionImg2ImgPipeline(DiffusionPipeline):
             truncation=True,
             return_tensors="pt",
         )
-        text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[0]
+        text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[
+            0
+        ]  # (1, 77, 768)
+        # you can technically add the aesthetic embedding to the text embedding,
+        # but adding it to the unconditional embed will be less noisy
+        # you can experiement by uncommenting the following line
+        # text_embeddings = text_embeddings * (1.0 - aesthetic_weight) + aesthetic_embed_pyt * aesthetic_weight
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -273,6 +322,28 @@ class StableDiffusionImg2ImgPipeline(DiffusionPipeline):
             uncond_embeddings = self.text_encoder(
                 uncond_input.input_ids.to(self.device)
             )[0]
+
+            aesthetic_embed_npy: np.array = load_aesthetic_vit_l_14_embed(
+                aesthetic_rating
+            )
+            aesthetic_embed_pyt: torch.FloatTensor = torch.from_numpy(
+                aesthetic_embed_npy
+            ).to(
+                self.device
+            )  # (768)
+            aesthetic_embed_pyt = aesthetic_embed_pyt.repeat(
+                text_embeddings.shape[1], 1
+            )  # (77, 768) # repeat 77 times
+            aesthetic_embed_pyt = aesthetic_embed_pyt.unsqueeze(
+                0
+            )  # (1, 77, 768) # (batch_size, max_seq_len, embed_dim)
+
+            # classifier free guidance encourages the model to move away from the unconditional embedding, toward the prompt embedding
+            # subtracting aesthetic from uncond thus makes the model move toward the prompt _and_ the aesthetic embedding,
+            # seemingly ignoring more noise from the aesthetic embedding
+            uncond_embeddings = (uncond_embeddings * (1.0 - aesthetic_weight)) - (
+                aesthetic_embed_pyt * aesthetic_weight
+            )
 
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
