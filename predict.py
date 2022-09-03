@@ -40,10 +40,16 @@ class Predictor(BasePredictor):
         self,
         prompt: str = Input(description="Input prompt", default=""),
         aesthetic_rating: int = Input(
-            description="An aesthetic 'rating' from 1 - 9 (1 is the lowest, 9 is the highest). 9 is mostly art and will tend to do a painting style more often. 6 - 8 tend to work well.", default=8, ge=1, le=9
+            description="An aesthetic 'rating' from 1 - 9 (1 is the lowest, 9 is the highest). 9 is mostly art and will tend to do a painting style more often. 6 - 8 tend to work well.",
+            default=8,
+            ge=1,
+            le=9,
         ),
         aesthetic_weight: float = Input(
-            description="How much of the aesthetic CLIP embed should be averaged with the unconditional latent. 0.0 will disable aesthetic guidance. Going above 0.2 tends to produce artifacts and highly abstract/simplified visuals.", default=0.1, ge=0, le=1
+            description="How much of the aesthetic CLIP embed should be subtracted from the unconditional latent. 0.0 will disable aesthetic guidance. Going above 0.2 tends to produce artifacts and highly abstract/simplified visuals.",
+            default=0.1,
+            ge=0,
+            le=1,
         ),
         width: int = Input(
             description="Width of output image. Maximum size is 1024x768 or 768x1024 because of memory limits",
