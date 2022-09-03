@@ -25,7 +25,8 @@ class Predictor(BasePredictor):
             beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear"
         )
         self.pipe = AestheticGuidedTextToImagePipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4",
+            # "CompVis/stable-diffusion-v1-4",
+            MODEL_CACHE,
             scheduler=scheduler,
             revision="fp16",
             torch_dtype=torch.float16,
@@ -38,6 +39,12 @@ class Predictor(BasePredictor):
     def predict(
         self,
         prompt: str = Input(description="Input prompt", default=""),
+        aesthetic_rating: int = Input(
+            description="An aesthetic 'rating' from 1 - 9 (1 is the lowest, 9 is the highest). 9 is mostly art and will tend to do a painting style more often. 6 - 8 tend to work well.", default=8, ge=1, le=9
+        ),
+        aesthetic_weight: float = Input(
+            description="How much of the aesthetic CLIP embed should be averaged with the unconditional latent. 0.0 will disable aesthetic guidance. Going above 0.2 tends to produce artifacts and highly abstract/simplified visuals.", default=0.1, ge=0, le=1
+        ),
         width: int = Input(
             description="Width of output image. Maximum size is 1024x768 or 768x1024 because of memory limits",
             choices=[128, 256, 512, 768, 1024],
@@ -71,12 +78,6 @@ class Predictor(BasePredictor):
         ),
         seed: int = Input(
             description="Random seed. Leave blank to randomize the seed", default=None
-        ),
-        aesthetic_rating: int = Input(
-            description="Aesthetic rating", default=8, ge=1, le=9
-        ),
-        aesthetic_weight: float = Input(
-            description="Aesthetic weight", default=0.1, ge=0, le=1
         ),
     ) -> List[Path]:
         """Run a single prediction on the model"""
